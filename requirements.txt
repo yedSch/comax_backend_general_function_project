@@ -1,0 +1,15 @@
+# Azure Functions
+azure-functions
+azure-storage-blob
+azure-storage-queue
+google-genai>=0.8.0
+
+# Google Cloud Vertex AI
+google-cloud-aiplatform
+google-cloud-core
+google-auth
+vertexai
+protobuf
+
+# HTTP requests
+requests
