@@ -2,6 +2,7 @@
 azure-functions
 azure-storage-blob
 azure-storage-queue
+azure-data-tables
 google-genai>=0.8.0
 
 # Google Cloud Vertex AI
@@ -10,6 +11,10 @@ google-cloud-core
 google-auth
 vertexai
 protobuf
+json-repair
+
+# Image splitting
+Pillow
 
 # HTTP requests
 requests
