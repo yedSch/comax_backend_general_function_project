@@ -9,6 +9,7 @@ from datetime import datetime
 import time
 import uuid
 import requests
+import httpx
 import xml.etree.ElementTree as ET
 from azure.storage.queue import (
     QueueClient,
@@ -905,14 +906,14 @@ def analyze_with_vertex_ai_strict(file_content: bytes, file_name: str, request_i
         )
     ]
 
-    max_retries = 3
+    max_retries = 2
     last_exc    = None
 
     # Thinking level per attempt. Dense multi-page invoices can exhaust
     # max_output_tokens on thinking alone (thinking tokens count against the
     # output budget), leaving candidate.content.parts == None. Drop to LOW on
     # retry so the budget goes to the actual JSON.
-    thinking_levels = ["LOW", "LOW", "MINIMAL"]
+    thinking_levels = ["LOW", "LOW"]
 
     for attempt in range(max_retries):
         cfg = types.GenerateContentConfig(
@@ -1021,31 +1022,67 @@ def analyze_with_vertex_ai_strict(file_content: bytes, file_name: str, request_i
             msg      = str(exc)
             is_last  = attempt >= max_retries - 1
 
+            # ── 1. Rate limiting ───────────────────────────────────────────────
             if "429" in msg and not is_last:
                 wait = 10 * (2 ** attempt)
+
                 logging.warning(
-                    f"[Vertex] 429 rate-limited (attempt {attempt+1}/{max_retries}), "
-                    f"retrying in {wait}s…"
+                    f"[Vertex] 429 rate-limited "
+                    f"(attempt {attempt+1}/{max_retries}), "
+                    f"retrying in {wait}s..."
                 )
+
                 time.sleep(wait)
                 continue
 
+            # ── 2. Transient HTTP/network failures ─────────────────────────────
+            #
+            # Includes:
+            # - RemoteProtocolError
+            # - ConnectError
+            # - ReadTimeout
+            # - ConnectTimeout
+            # - connection reset / transport errors
+            #
+            if isinstance(exc, httpx.TransportError) and not is_last:
+                wait = 3 * (2 ** attempt)
+
+                logging.warning(
+                    f"[Vertex] Transient network error "
+                    f"(attempt {attempt+1}/{max_retries}): "
+                    f"{type(exc).__name__}: {exc}. "
+                    f"Retrying in {wait}s..."
+                )
+
+                time.sleep(wait)
+                continue
+
+            # ── 3. Empty Gemini response ───────────────────────────────────────
             if "EMPTY_RESPONSE" in msg and not is_last:
                 logging.warning(
-                    f"[Vertex] Empty response on attempt {attempt+1}/{max_retries} "
-                    f"({msg}) — retrying with lower thinking budget…"
+                    f"[Vertex] Empty response on attempt "
+                    f"{attempt+1}/{max_retries} "
+                    f"({msg}) — retrying with lower thinking budget..."
                 )
                 continue
 
+            # ── 4. Invalid/truncated JSON ──────────────────────────────────────
             if "MALFORMED_JSON" in msg and not is_last:
                 logging.warning(
-                    f"[Vertex] Malformed JSON on attempt {attempt+1}/{max_retries}, "
-                    f"retrying with higher temperature…"
+                    f"[Vertex] Malformed JSON on attempt "
+                    f"{attempt+1}/{max_retries}, "
+                    f"retrying with higher temperature..."
                 )
                 continue
 
-            logging.error(f"[Vertex] Giving up after attempt {attempt+1}: {exc}", exc_info=True)
-            raise
+            # ── Nothing retryable / final attempt ─────────────────────────────
+            logging.error(
+                f"[Vertex] Giving up after attempt {attempt+1}/{max_retries}: "
+                f"{type(exc).__name__}: {exc}",
+                exc_info=True,
+            )
+
+            raise    
 
     raise last_exc
 
